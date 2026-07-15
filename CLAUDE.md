@@ -12,11 +12,19 @@ FastMCP server exposing Dagster+ operational data via GraphQL.
   `Annotated[type, Field(description=...)]`, wrapped with `@_handle_gql_errors`
   for structured error returns
 - `__main__.py` — entry point (imports `tools` to trigger registration)
+- `scripts/` — PEP 723 standalone scripts: `refresh_schema.py` (re-introspect
+  the live API into `schema.json`), `validate_queries.py` (validate every
+  query in `queries.py` against `schema.json`)
+- `tests/` — pytest unit tests; `gql()` is mocked (see `GqlRecorder` in
+  `conftest.py`), no API access needed. Run with `uv run --group dev pytest`.
 
 **Adding a tool:** Add query to `queries.py`, add `@server.tool()` function to
 `tools.py` with the `@_handle_gql_errors` decorator. FastMCP auto-generates JSON
 schema from type hints. Use `BaseModel` subclasses for complex input types (see
-`RunSpec`).
+`RunSpec`). Give the tool a trailing `deployment: Deployment = None` parameter
+and pass `deployment=deployment` to every `gql()` call so it supports
+branch-deployment targeting. Run `uv run scripts/validate_queries.py` before
+committing query changes.
 
 **Testing imports:** All three env vars (`DAGSTER_CLOUD_API_TOKEN`,
 `DAGSTER_CLOUD_ORGANIZATION_ID`, `DAGSTER_CLOUD_DEPLOYMENT`) are required at
@@ -32,11 +40,28 @@ uv run python -m dagster_plus_mcp
 
 ## Environment Variables
 
-| Variable                        | Required | Description      |
-| ------------------------------- | -------- | ---------------- |
-| `DAGSTER_CLOUD_API_TOKEN`       | Yes      | User/agent token |
-| `DAGSTER_CLOUD_ORGANIZATION_ID` | Yes      | Org slug         |
-| `DAGSTER_CLOUD_DEPLOYMENT`      | Yes      | Deployment name  |
+| Variable                        | Required | Description              |
+| ------------------------------- | -------- | ------------------------ |
+| `DAGSTER_CLOUD_API_TOKEN`       | Yes      | User/agent token         |
+| `DAGSTER_CLOUD_ORGANIZATION_ID` | Yes      | Org slug                 |
+| `DAGSTER_CLOUD_DEPLOYMENT`      | Yes      | Default deployment name  |
+
+`DAGSTER_CLOUD_DEPLOYMENT` is only the default: every tool accepts an optional
+`deployment` argument that reroutes that call to another deployment's GraphQL
+endpoint (e.g. a branch deployment). `list_deployments` discovers deployment
+names, including active branch deployments with branch/PR metadata.
+
+## Refreshing schema.json
+
+```bash
+DAGSTER_CLOUD_API_TOKEN=... DAGSTER_CLOUD_ORGANIZATION_ID=... \
+DAGSTER_CLOUD_DEPLOYMENT=prod uv run scripts/refresh_schema.py
+uv run scripts/validate_queries.py
+```
+
+The refresh overwrites the introspection dump; the validator then reports any
+query in `queries.py` broken by schema drift. Reconcile the "Schema gotchas"
+list below after a refresh.
 
 ## GraphQL Schema Reference
 
@@ -125,16 +150,24 @@ Tool selection and diagnostic workflows are in the server `instructions` (see
 
 ## Mutation tools
 
-Three tools launch runs via GraphQL mutations. All use a **confirm flag
-pattern**: `confirm=False` (default) returns a preview of what would be sent;
+All mutation tools use a **confirm flag pattern**: `confirm=False` (default)
+returns a preview of what would be sent (usually the target's current state);
 `confirm=True` executes the mutation. No server-side state — preview and execute
 are independent calls.
 
-| Tool                   | Description                                                                   |
-| ---------------------- | ----------------------------------------------------------------------------- |
-| `launch_run`           | Materialize selected assets in a code location                                |
-| `launch_multiple_runs` | Batch-launch multiple asset materializations                                  |
-| `reexecute_run`        | Re-execute a previous run (`FROM_FAILURE`, `FROM_ASSET_FAILURE`, `ALL_STEPS`) |
+| Tool                              | Description                                                                   |
+| --------------------------------- | ----------------------------------------------------------------------------- |
+| `launch_run`                      | Materialize selected assets in a code location                                |
+| `launch_multiple_runs`            | Batch-launch multiple asset materializations                                  |
+| `reexecute_run`                   | Re-execute a previous run (`FROM_FAILURE`, `FROM_ASSET_FAILURE`, `ALL_STEPS`) |
+| `terminate_runs`                  | Cancel runs (`SAFE_TERMINATE` or `MARK_AS_CANCELED_IMMEDIATELY`)              |
+| `cancel_backfill`                 | Cancel an in-progress backfill                                                |
+| `resume_backfill`                 | Resume a failed/canceled backfill                                             |
+| `start_schedule` / `stop_schedule`| Turn a schedule on/off by name + location                                     |
+| `start_sensor` / `stop_sensor`    | Turn a sensor on/off by name + location                                       |
+| `set_sensor_cursor`               | Set or reset a sensor's cursor                                                |
+| `reload_code_location`            | Re-import a code location's definitions                                       |
+| `free_concurrency_slots`          | Free slots held by a dead run                                                 |
 
 ### Usage pattern
 
@@ -151,3 +184,8 @@ are independent calls.
 - `launchMultipleRuns` returns a nested result: the outer union has
   `LaunchMultipleRunsResult`, whose `launchMultipleRunsResult` field is a list
   of per-run `LaunchRunResult` unions
+- `startSchedule`/`startSensor` take a selector (name + location + repo), but
+  `stopRunningSchedule`/`stopSensor` take the **InstigationState id** — the
+  stop tools resolve it first via `scheduleOrError`/`sensorOrError`, so a stop
+  is two GraphQL calls
+- `freeConcurrencySlots` returns a bare `Boolean!`, not a result union
