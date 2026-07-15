@@ -246,6 +246,55 @@ class TestGqlUrlSelection:
         await server.gql("query { ok }")
         assert posted["url"] == ""
 
+    async def test_invalid_deployment_name_rejected(self, monkeypatch):
+        from dagster_plus_mcp import server
+
+        class FakeClient:
+            async def post(self, url, json):
+                raise AssertionError("request must not be sent")
+
+        monkeypatch.setattr(server, "_client", FakeClient())
+        for bad in ["prod/graphql?x=", "../org-settings", "", "a b"]:
+            with pytest.raises(ValueError):
+                await server.gql("query { ok }", deployment=bad)
+
+    async def test_http_error_raises_graphql_error(self, monkeypatch):
+        from dagster_plus_mcp import server
+
+        class FakeClient:
+            async def post(self, url, json):
+                class R:
+                    is_success = False
+                    status_code = 502
+                    text = "bad gateway" * 100
+
+                return R()
+
+        monkeypatch.setattr(server, "_client", FakeClient())
+        with pytest.raises(GraphQLError) as exc_info:
+            await server.gql("query { ok }")
+        assert "502" in exc_info.value.message
+        assert len(exc_info.value.details) <= 500
+
+    async def test_graphql_errors_payload_raises(self, monkeypatch):
+        from dagster_plus_mcp import server
+
+        class FakeClient:
+            async def post(self, url, json):
+                class R:
+                    is_success = True
+
+                    @staticmethod
+                    def json():
+                        return {"errors": [{"message": "bad field"}]}
+
+                return R()
+
+        monkeypatch.setattr(server, "_client", FakeClient())
+        with pytest.raises(GraphQLError) as exc_info:
+            await server.gql("query { ok }")
+        assert exc_info.value.details == [{"message": "bad field"}]
+
 
 class TestMutationConfirmPattern:
     async def test_terminate_runs_preview_fetches_current_status(self, gql_recorder):
@@ -298,10 +347,48 @@ class TestMutationConfirmPattern:
         )
         assert result["__typename"] == "ResumeBackfillSuccess"
 
-    async def test_reload_code_location_preview_makes_no_call(self, gql_recorder):
+    WORKSPACE = {
+        "workspaceOrError": {
+            "locationEntries": [
+                {"name": "kipptaf", "loadStatus": "LOADED"},
+                {"name": "kippnewark", "loadStatus": "LOADED"},
+            ]
+        }
+    }
+
+    async def test_reload_code_location_preview_shows_current_state(
+        self, gql_recorder
+    ):
+        gql_recorder.queue(json.loads(json.dumps(self.WORKSPACE)))
         result = json.loads(await tools.reload_code_location(location_name="kipptaf"))
         assert result["mode"] == "preview"
-        assert gql_recorder.calls == []
+        assert result["location"] == {"name": "kipptaf", "loadStatus": "LOADED"}
+
+    async def test_reload_code_location_preview_unknown_location_errors(
+        self, gql_recorder
+    ):
+        gql_recorder.queue(json.loads(json.dumps(self.WORKSPACE)))
+        result = json.loads(await tools.reload_code_location(location_name="typo"))
+        assert "error" in result
+        assert result["known_locations"] == ["kipptaf", "kippnewark"]
+
+    async def test_reload_code_location_confirm_executes(self, gql_recorder):
+        gql_recorder.queue(
+            {"reloadRepositoryLocation": {"__typename": "WorkspaceLocationEntry"}}
+        )
+        result = json.loads(
+            await tools.reload_code_location(location_name="kipptaf", confirm=True)
+        )
+        assert result["__typename"] == "WorkspaceLocationEntry"
+        assert gql_recorder.calls[0]["query"] == (
+            queries.RELOAD_REPOSITORY_LOCATION_MUTATION
+        )
+
+    async def test_free_concurrency_slots_preview_shows_run(self, gql_recorder):
+        gql_recorder.queue({"runOrError": {"id": "r1", "status": "FAILURE"}})
+        result = json.loads(await tools.free_concurrency_slots(run_id="r1"))
+        assert result["mode"] == "preview"
+        assert result["run"]["status"] == "FAILURE"
 
     async def test_free_concurrency_slots_confirm(self, gql_recorder):
         gql_recorder.queue({"freeConcurrencySlots": True})
@@ -428,6 +515,63 @@ class TestScheduleSensorControls:
         call = gql_recorder.calls[0]
         assert call["query"] == queries.SET_SENSOR_CURSOR_MUTATION
         assert call["variables"]["cursor"] == "12345"
+
+    async def test_set_sensor_cursor_requires_cursor_or_reset(self, gql_recorder):
+        result = json.loads(
+            await tools.set_sensor_cursor(
+                sensor_name="my_sensor",
+                repository_location_name="kipptaf",
+                confirm=True,
+            )
+        )
+        assert "error" in result
+        assert gql_recorder.calls == []
+
+    async def test_set_sensor_cursor_rejects_cursor_and_reset(self, gql_recorder):
+        result = json.loads(
+            await tools.set_sensor_cursor(
+                sensor_name="my_sensor",
+                repository_location_name="kipptaf",
+                cursor="12345",
+                reset=True,
+                confirm=True,
+            )
+        )
+        assert "error" in result
+        assert gql_recorder.calls == []
+
+    async def test_set_sensor_cursor_reset_sends_null(self, gql_recorder):
+        gql_recorder.queue({"setSensorCursor": {"__typename": "Sensor"}})
+        await tools.set_sensor_cursor(
+            sensor_name="my_sensor",
+            repository_location_name="kipptaf",
+            reset=True,
+            confirm=True,
+        )
+        assert gql_recorder.calls[0]["variables"]["cursor"] is None
+
+    async def test_stop_schedule_preview_shows_state(self, gql_recorder):
+        gql_recorder.queue(json.loads(json.dumps(self.SCHEDULE)))
+        result = json.loads(
+            await tools.stop_schedule(
+                schedule_name="my_schedule",
+                repository_location_name="kipptaf",
+            )
+        )
+        assert result["mode"] == "preview"
+        assert result["schedule"]["scheduleState"]["id"] == "state-1"
+        assert len(gql_recorder.calls) == 1
+
+    async def test_start_sensor_preview_shows_state(self, gql_recorder):
+        gql_recorder.queue(json.loads(json.dumps(self.SENSOR)))
+        result = json.loads(
+            await tools.start_sensor(
+                sensor_name="my_sensor",
+                repository_location_name="kipptaf",
+            )
+        )
+        assert result["mode"] == "preview"
+        assert gql_recorder.calls[0]["query"] == queries.SENSOR_STATE_QUERY
 
     async def test_mutation_threads_deployment(self, gql_recorder):
         gql_recorder.queue(

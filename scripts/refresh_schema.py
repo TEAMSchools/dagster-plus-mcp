@@ -48,6 +48,8 @@ def main() -> int:
         print(f"Introspection failed: {payload['errors']}", file=sys.stderr)
         return 1
 
+    # The committed dump is the bare introspection result (no {"data": ...}
+    # wrapper); validate_queries.py accepts either shape for compatibility.
     SCHEMA_PATH.write_text(json.dumps(payload["data"], indent=1, sort_keys=True))
     type_count = len(payload["data"]["__schema"]["types"])
     print(f"Wrote {SCHEMA_PATH} ({type_count} types)")

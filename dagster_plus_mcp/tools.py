@@ -1432,10 +1432,21 @@ async def set_sensor_cursor(
         str | None,
         Field(
             description=(
-                "New cursor value. Pass null to reset the cursor entirely."
+                "New cursor value. To clear the cursor, omit this and set "
+                "reset=True instead."
             ),
         ),
     ] = None,
+    reset: Annotated[
+        bool,
+        Field(
+            description=(
+                "Set True to clear the sensor's cursor. Required when cursor "
+                "is omitted, so a forgotten cursor can't silently wipe the "
+                "sensor's position."
+            ),
+        ),
+    ] = False,
     repository_name: Annotated[
         str,
         Field(description="The repository name (default '__repository__')."),
@@ -1451,7 +1462,20 @@ async def set_sensor_cursor(
     ] = False,
     deployment: Deployment = None,
 ) -> str:
-    """Set or reset a Dagster+ sensor's cursor (its tracking position). Call with confirm=False first to preview the current cursor, then confirm=True to execute."""
+    """Set or reset a Dagster+ sensor's cursor (its tracking position). Pass cursor to set a value, or reset=True to clear it. Call with confirm=False first to preview the current cursor, then confirm=True to execute."""
+    if cursor is None and not reset:
+        return json.dumps(
+            {
+                "error": (
+                    "cursor is required unless reset=True — refusing to "
+                    "clear the cursor implicitly"
+                ),
+            },
+        )
+    if cursor is not None and reset:
+        return json.dumps(
+            {"error": "pass either cursor or reset=True, not both"},
+        )
     selector = {
         "sensorName": sensor_name,
         "repositoryLocationName": repository_location_name,
@@ -1495,12 +1519,29 @@ async def reload_code_location(
     ] = False,
     deployment: Deployment = None,
 ) -> str:
-    """Reload a Dagster+ code location (re-import its definitions). Use after a failed deploy or to pick up external changes. Call with confirm=False first, then confirm=True to execute."""
+    """Reload a Dagster+ code location (re-import its definitions). Use after a failed deploy or to pick up external changes. Call with confirm=False first to preview the location's current load status, then confirm=True to execute."""
     if not confirm:
+        data = await gql(CODE_LOCATIONS_QUERY, deployment=deployment)
+        workspace = data["workspaceOrError"]
+        entries = (
+            workspace.get("locationEntries", [])
+            if isinstance(workspace, dict)
+            else []
+        )
+        match = next(
+            (e for e in entries if e.get("name") == location_name), None
+        )
+        if match is None:
+            return json.dumps(
+                {
+                    "error": f"code location {location_name!r} not found",
+                    "known_locations": [e.get("name") for e in entries],
+                },
+            )
         return json.dumps(
             {
                 "mode": "preview",
-                "location_name": location_name,
+                "location": match,
                 "action_required": "Call again with confirm=True to execute.",
             },
         )
@@ -1539,12 +1580,13 @@ async def free_concurrency_slots(
     ] = False,
     deployment: Deployment = None,
 ) -> str:
-    """Free concurrency slots held by a Dagster+ run — unblocks pipelines stuck behind a dead run that never released its slots. Call with confirm=False first, then confirm=True to execute."""
+    """Free concurrency slots held by a Dagster+ run — unblocks pipelines stuck behind a dead run that never released its slots. Call with confirm=False first to preview the run's current status, then confirm=True to execute."""
     if not confirm:
+        data = await gql(RUN_BY_ID_QUERY, {"runId": run_id}, deployment=deployment)
         return json.dumps(
             {
                 "mode": "preview",
-                "run_id": run_id,
+                "run": data["runOrError"],
                 "step_key": step_key,
                 "action_required": "Call again with confirm=True to execute.",
             },

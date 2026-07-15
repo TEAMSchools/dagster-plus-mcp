@@ -2,9 +2,11 @@
 
 import os
 
-os.environ.setdefault("DAGSTER_CLOUD_API_TOKEN", "test-token")
-os.environ.setdefault("DAGSTER_CLOUD_ORGANIZATION_ID", "test-org")
-os.environ.setdefault("DAGSTER_CLOUD_DEPLOYMENT", "test-deployment")
+# Force-set (not setdefault): tests assert URLs built from these values, so a
+# real token/org in the shell must not leak into the suite.
+os.environ["DAGSTER_CLOUD_API_TOKEN"] = "test-token"
+os.environ["DAGSTER_CLOUD_ORGANIZATION_ID"] = "test-org"
+os.environ["DAGSTER_CLOUD_DEPLOYMENT"] = "test-deployment"
 
 import pytest  # noqa: E402
 
