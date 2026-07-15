@@ -16,21 +16,34 @@ from .queries import (
     ASSET_STALENESS_QUERY,
     BACKFILL_QUERY,
     BACKFILLS_QUERY,
+    CANCEL_BACKFILL_MUTATION,
     CAPTURED_LOGS_METADATA_QUERY,
     CLOUD_AGENTS_QUERY,
     CODE_LOCATIONS_QUERY,
     COMPUTE_LOGS_QUERY,
     DAEMON_HEALTH_QUERY,
+    FREE_CONCURRENCY_SLOTS_MUTATION,
+    FULL_DEPLOYMENTS_QUERY,
     LAUNCH_MULTIPLE_RUNS_MUTATION,
     LAUNCH_RUN_MUTATION,
     LAUNCH_RUN_REEXECUTION_MUTATION,
     LIST_RUNS_QUERY,
     LOCATION_LOAD_HISTORY_QUERY,
+    RELOAD_REPOSITORY_LOCATION_MUTATION,
+    RESUME_BACKFILL_MUTATION,
     RUN_BY_ID_QUERY,
     RUN_GROUP_QUERY,
     RUN_LOGS_QUERY,
+    SCHEDULE_STATE_QUERY,
     SCHEDULES_QUERY,
+    SENSOR_STATE_QUERY,
     SENSORS_QUERY,
+    SET_SENSOR_CURSOR_MUTATION,
+    START_SCHEDULE_MUTATION,
+    START_SENSOR_MUTATION,
+    STOP_SCHEDULE_MUTATION,
+    STOP_SENSOR_MUTATION,
+    TERMINATE_RUNS_MUTATION,
     TICK_HISTORY_QUERY,
 )
 from .server import GraphQLError, gql, server
@@ -53,6 +66,17 @@ def _handle_gql_errors(fn):
 
     return wrapper
 
+
+Deployment = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Deployment to target (e.g. a branch deployment name from "
+            "list_deployments). Omit for the default deployment configured "
+            "at server launch."
+        ),
+    ),
+]
 
 RunStatus = Literal[
     "QUEUED",
@@ -142,6 +166,7 @@ async def list_runs(
         float | None,
         Field(description="Filter to runs updated before this Unix timestamp."),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """List recent Dagster+ runs. Filter by job name, run IDs, status, tags, or time range. Returns run IDs, job names, statuses, asset selections, re-execution lineage, and timestamps."""
     limit = min(limit, 100)
@@ -169,6 +194,7 @@ async def list_runs(
             "cursor": cursor,
             "limit": limit,
         },
+        deployment=deployment,
     )
     return json.dumps(data["runsOrError"])
 
@@ -180,9 +206,10 @@ async def get_run(
         str,
         Field(description="The run ID (UUID) to look up."),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get full details for a single Dagster+ run by ID. Includes asset selection, re-execution lineage (parentRunId, rootRunId), step keys, step counts, and tags."""
-    data = await gql(RUN_BY_ID_QUERY, {"runId": run_id})
+    data = await gql(RUN_BY_ID_QUERY, {"runId": run_id}, deployment=deployment)
     return json.dumps(data["runOrError"])
 
 
@@ -217,6 +244,7 @@ async def get_run_logs(
             ),
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get the structured event log for a Dagster+ run. Includes step start/success/failure events, log messages, asset materializations, engine errors, and resource init failures. Paginate with cursor if hasMore is true."""
     limit = min(limit, 1000)
@@ -227,6 +255,7 @@ async def get_run_logs(
             "afterCursor": cursor,
             "limit": limit,
         },
+        deployment=deployment,
     )
     result = data["logsForRun"]
     if filter_types:
@@ -261,6 +290,7 @@ async def get_run_compute_logs(
         int,
         Field(description="Max bytes to return (default 50000)."),
     ] = 50000,
+    deployment: Deployment = None,
 ) -> str:
     """Get raw stdout and stderr compute logs for a step in a Dagster+ run. First use get_run_logs to find LogsCapturedEvent entries, which contain the logKey needed here. Returns both stdout and stderr as separate fields."""
     data = await gql(
@@ -270,6 +300,7 @@ async def get_run_compute_logs(
             "cursor": cursor,
             "limit": limit,
         },
+        deployment=deployment,
     )
     return json.dumps(data["capturedLogs"])
 
@@ -281,20 +312,22 @@ async def get_captured_logs_metadata(
         list[str],
         Field(description="The logKey array from a LogsCapturedEvent."),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get signed download URLs and storage locations for stdout/stderr compute logs. Use when logs are too large to stream via get_run_compute_logs. logKey comes from a LogsCapturedEvent."""
     data = await gql(
         CAPTURED_LOGS_METADATA_QUERY,
         {"logKey": log_key},
+        deployment=deployment,
     )
     return json.dumps(data["capturedLogsMetadata"])
 
 
 @server.tool()
 @_handle_gql_errors
-async def get_daemon_health() -> str:
+async def get_daemon_health(deployment: Deployment = None) -> str:
     """Get the health status of all Dagster+ daemons (scheduler, sensor, run coordinator, etc.). Returns whether each daemon is healthy, its last heartbeat time, and any error messages."""
-    data = await gql(DAEMON_HEALTH_QUERY)
+    data = await gql(DAEMON_HEALTH_QUERY, deployment=deployment)
     return json.dumps(data["instance"]["daemonHealth"]["allDaemonStatuses"])
 
 
@@ -326,9 +359,10 @@ async def get_cloud_agents(
             description="Filter agents by status.",
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get Dagster Cloud agent statuses, recent errors, code server states, and run worker states. Use for diagnosing agent-level issues like gRPC connectivity failures, code server crashes, or agent heartbeat gaps."""
-    data = await gql(CLOUD_AGENTS_QUERY)
+    data = await gql(CLOUD_AGENTS_QUERY, deployment=deployment)
     agents: list[dict[str, Any]] = data["agents"]
 
     if status is not None:
@@ -385,9 +419,9 @@ async def get_cloud_agents(
 
 @server.tool()
 @_handle_gql_errors
-async def list_code_locations() -> str:
+async def list_code_locations(deployment: Deployment = None) -> str:
     """List all code locations in the Dagster+ workspace and their load status. Shows which locations loaded successfully and which have errors (e.g. import failures after a deploy)."""
-    data = await gql(CODE_LOCATIONS_QUERY)
+    data = await gql(CODE_LOCATIONS_QUERY, deployment=deployment)
     return json.dumps(data["workspaceOrError"])
 
 
@@ -403,10 +437,11 @@ async def get_asset_health(
             ),
         ),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get health status for specific assets. Returns overall health (HEALTHY, DEGRADED, WARNING, UNKNOWN), materialization status, asset checks status, and freshness status with detailed metadata."""
     asset_keys_input = [{"path": key.split("/")} for key in asset_keys[:250]]
-    data = await gql(ASSET_HEALTH_QUERY, {"assetKeys": asset_keys_input})
+    data = await gql(ASSET_HEALTH_QUERY, {"assetKeys": asset_keys_input}, deployment=deployment)
     return json.dumps(data["assetsOrError"])
 
 
@@ -422,10 +457,11 @@ async def get_asset_staleness(
             ),
         ),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get staleness status and root causes for specific assets. Returns stale status and each cause (category: CODE, DATA, or DEPENDENCIES) with the dependency that triggered it."""
     asset_keys_input = [{"path": key.split("/")} for key in asset_keys[:250]]
-    data = await gql(ASSET_STALENESS_QUERY, {"assetKeys": asset_keys_input})
+    data = await gql(ASSET_STALENESS_QUERY, {"assetKeys": asset_keys_input}, deployment=deployment)
     return json.dumps(data["assetNodes"])
 
 
@@ -449,13 +485,14 @@ async def search_assets(
             ),
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Search and browse assets in the Dagster+ deployment with pagination. Returns asset key, group, compute kind, owners, tags, jobs, automation conditions, and repository location. Use this to discover assets before drilling into health or staleness. Note: assets without a code definition (materialized-only) return definition=null."""
     limit = min(limit, 250)
     variables: dict[str, Any] = {"limit": limit, "cursor": cursor}
     if prefix:
         variables["prefix"] = prefix.split("/")
-    data = await gql(ASSET_CATALOG_QUERY, variables)
+    data = await gql(ASSET_CATALOG_QUERY, variables, deployment=deployment)
     return json.dumps(data["assetsOrError"])
 
 
@@ -484,6 +521,7 @@ async def get_asset_materializations(
             description="Only return materializations before this timestamp (milliseconds since epoch, as string). Server-side filter."
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get recent materialization history for an asset. Returns timestamps, run IDs, partition keys, and metadata entries for each materialization."""
     asset_key_path = asset_key.split("/")
@@ -496,6 +534,7 @@ async def get_asset_materializations(
             "partitions": [partition] if partition else None,
             "beforeTimestampMillis": before_timestamp_millis,
         },
+        deployment=deployment,
     )
     nodes = data["assetNodes"]
     result = (
@@ -513,12 +552,14 @@ async def get_asset_partition_statuses(
         str,
         Field(description="Asset key as slash-separated string."),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get partition materialization status for a partitioned asset. Returns aggregate counts (materialized, failed, missing) and, for time-partitioned assets, a range breakdown."""
     asset_key_path = asset_key.split("/")
     data = await gql(
         ASSET_PARTITION_STATUSES_QUERY,
         {"assetKey": {"path": asset_key_path}},
+        deployment=deployment,
     )
     nodes = data["assetNodes"]
     result = nodes[0] if nodes else {}
@@ -550,6 +591,7 @@ async def get_asset_check_executions(
             description='Filter to a specific partition key. Empty string ("") returns only unpartitioned executions.'
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get execution history for a specific asset check. Returns pass/fail status, severity, description, and metadata for each execution."""
     asset_key_path = asset_key.split("/")
@@ -563,6 +605,7 @@ async def get_asset_check_executions(
             "cursor": cursor,
             "partition": partition,
         },
+        deployment=deployment,
     )
     return json.dumps(data["assetCheckExecutions"])
 
@@ -584,6 +627,7 @@ async def get_asset_condition_evaluations(
         str | None,
         Field(description="Pagination cursor from a previous call."),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get automation condition evaluation history for an asset. Shows why the daemon requested or skipped each materialization — includes the full condition node tree with each node's label, operator type, and true/candidate counts."""
     asset_key_path = asset_key.split("/")
@@ -595,6 +639,7 @@ async def get_asset_condition_evaluations(
             "limit": limit,
             "cursor": cursor,
         },
+        deployment=deployment,
     )
     return json.dumps(data["assetConditionEvaluationRecordsOrError"])
 
@@ -636,6 +681,7 @@ async def get_tick_history(
             description="Only return ticks at or before this Unix epoch (seconds). Server-side filter."
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get tick history for a schedule or sensor. Shows each evaluation tick with its status (SUCCESS, FAILURE, SKIPPED), run IDs launched, skip reason, and error details. Essential for diagnosing why a schedule or sensor is not firing."""
     data = await gql(
@@ -649,6 +695,7 @@ async def get_tick_history(
             "afterTimestamp": after_timestamp,
             "beforeTimestamp": before_timestamp,
         },
+        deployment=deployment,
     )
     return json.dumps(data["instigationStateOrError"])
 
@@ -680,6 +727,7 @@ async def list_backfills(
             description="Filter to backfills created before this Unix timestamp. Server-side filter."
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """List backfills in the Dagster+ deployment. Returns backfill ID, status, asset selection, partition counts by run status, and any errors."""
     limit = min(limit, 100)
@@ -696,6 +744,7 @@ async def list_backfills(
             "limit": limit,
             "filters": filters or None,
         },
+        deployment=deployment,
     )
     return json.dumps(data["partitionBackfillsOrError"])
 
@@ -707,9 +756,10 @@ async def get_backfill(
         str,
         Field(description="The backfill ID to look up."),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get details for a single backfill by ID. Returns asset selection, partition names, status counts, error, and metadata."""
-    data = await gql(BACKFILL_QUERY, {"backfillId": backfill_id})
+    data = await gql(BACKFILL_QUERY, {"backfillId": backfill_id}, deployment=deployment)
     return json.dumps(data["partitionBackfillOrError"])
 
 
@@ -750,6 +800,7 @@ async def launch_run(
             ),
         ),
     ] = False,
+    deployment: Deployment = None,
 ) -> str:
     """Launch a Dagster+ run to materialize selected assets. Call with confirm=False first to preview, then confirm=True to execute."""
     if not asset_keys:
@@ -769,7 +820,7 @@ async def launch_run(
                 "action_required": "Call again with confirm=True to execute.",
             },
         )
-    data = await gql(LAUNCH_RUN_MUTATION, {"executionParams": params})
+    data = await gql(LAUNCH_RUN_MUTATION, {"executionParams": params}, deployment=deployment)
     return json.dumps(data["launchRun"])
 
 
@@ -817,6 +868,7 @@ async def launch_multiple_runs(
             ),
         ),
     ] = False,
+    deployment: Deployment = None,
 ) -> str:
     """Launch multiple Dagster+ runs in a single batch. Call with confirm=False first to preview, then confirm=True to execute."""
     params_list = [
@@ -840,6 +892,7 @@ async def launch_multiple_runs(
     data = await gql(
         LAUNCH_MULTIPLE_RUNS_MUTATION,
         {"executionParamsList": params_list},
+        deployment=deployment,
     )
     return json.dumps(data["launchMultipleRuns"])
 
@@ -874,10 +927,11 @@ async def reexecute_run(
             ),
         ),
     ] = False,
+    deployment: Deployment = None,
 ) -> str:
     """Re-execute a previous Dagster+ run with the given strategy. Call with confirm=False first to preview parent run details, then confirm=True to execute."""
     if not confirm:
-        parent_data = await gql(RUN_BY_ID_QUERY, {"runId": parent_run_id})
+        parent_data = await gql(RUN_BY_ID_QUERY, {"runId": parent_run_id}, deployment=deployment)
         return json.dumps(
             {
                 "mode": "preview",
@@ -898,6 +952,7 @@ async def reexecute_run(
     data = await gql(
         LAUNCH_RUN_REEXECUTION_MUTATION,
         {"reexecutionParams": reexecution_params},
+        deployment=deployment,
     )
     return json.dumps(data["launchRunReexecution"])
 
@@ -934,6 +989,7 @@ async def list_schedules(
             description="Filter to schedules with this status (RUNNING or STOPPED). Omit for all."
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """List all schedules in a code location. Returns schedule name, cron expression, job name, timezone, current status, and tags."""
     data = await gql(
@@ -943,6 +999,7 @@ async def list_schedules(
             "repositoryLocationName": repository_location_name,
             "scheduleStatus": schedule_status,
         },
+        deployment=deployment,
     )
     return json.dumps(data["schedulesOrError"])
 
@@ -966,6 +1023,7 @@ async def list_sensors(
             description="Filter to sensors with this status (RUNNING or STOPPED). Omit for all."
         ),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """List all sensors in a code location. Returns sensor name, type, description, current status, next tick timestamp, target jobs, and tags. Use this to discover sensor names before calling get_tick_history."""
     data = await gql(
@@ -975,6 +1033,7 @@ async def list_sensors(
             "repositoryLocationName": repository_location_name,
             "sensorStatus": sensor_status,
         },
+        deployment=deployment,
     )
     return json.dumps(data["sensorsOrError"])
 
@@ -986,9 +1045,10 @@ async def get_run_group(
         str,
         Field(description="Any run ID in the re-execution chain."),
     ],
+    deployment: Deployment = None,
 ) -> str:
     """Get the full re-execution chain for a run. Returns all runs sharing the same root, with their statuses and timestamps. More efficient than manually traversing parentRunId/rootRunId."""
-    data = await gql(RUN_GROUP_QUERY, {"runId": run_id})
+    data = await gql(RUN_GROUP_QUERY, {"runId": run_id}, deployment=deployment)
     return json.dumps(data["runGroupOrError"])
 
 
@@ -1007,6 +1067,7 @@ async def get_location_load_history(
         str | None,
         Field(description="Pagination cursor from a previous call."),
     ] = None,
+    deployment: Deployment = None,
 ) -> str:
     """Get the load/reload history for a code location. Shows each deploy attempt with load status (LOADED or ERROR), timestamps, metadata, and error details. Use for diagnosing deploy failures."""
     limit = min(limit, 50)
@@ -1017,5 +1078,480 @@ async def get_location_load_history(
             "limit": limit,
             "cursor": cursor,
         },
+        deployment=deployment,
     )
     return json.dumps(data["locationLoadHistory"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def list_deployments() -> str:
+    """List all deployments in the Dagster+ organization: production plus active branch deployments. Returns deployment names (usable as the deployment argument on other tools), status, type, and branch/PR metadata for branch deployments."""
+    data = await gql(FULL_DEPLOYMENTS_QUERY)
+    return json.dumps(data["fullDeployments"])
+
+
+TerminatePolicy = Literal["SAFE_TERMINATE", "MARK_AS_CANCELED_IMMEDIATELY"]
+
+
+@server.tool()
+@_handle_gql_errors
+async def terminate_runs(
+    run_ids: Annotated[
+        list[str],
+        Field(description="Run IDs (UUIDs) to terminate.", min_length=1),
+    ],
+    terminate_policy: Annotated[
+        TerminatePolicy,
+        Field(
+            description=(
+                "SAFE_TERMINATE (default) interrupts the run and waits for "
+                "cleanup; MARK_AS_CANCELED_IMMEDIATELY force-marks the run "
+                "canceled without waiting (use for stuck run workers)."
+            ),
+        ),
+    ] = "SAFE_TERMINATE",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with each run's current "
+                "status. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Terminate in-progress Dagster+ runs. Call with confirm=False first to preview the runs' current statuses, then confirm=True to execute."""
+    if not confirm:
+        data = await gql(
+            LIST_RUNS_QUERY,
+            {"filter": {"runIds": run_ids}, "limit": len(run_ids)},
+            deployment=deployment,
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "runs": data["runsOrError"],
+                "terminate_policy": terminate_policy,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        TERMINATE_RUNS_MUTATION,
+        {"runIds": run_ids, "terminatePolicy": terminate_policy},
+        deployment=deployment,
+    )
+    return json.dumps(data["terminateRuns"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def cancel_backfill(
+    backfill_id: Annotated[
+        str,
+        Field(description="The backfill ID to cancel."),
+    ],
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the backfill's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Cancel an in-progress Dagster+ backfill. Call with confirm=False first to preview the backfill's current state, then confirm=True to execute."""
+    if not confirm:
+        data = await gql(
+            BACKFILL_QUERY, {"backfillId": backfill_id}, deployment=deployment
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "backfill": data["partitionBackfillOrError"],
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        CANCEL_BACKFILL_MUTATION, {"backfillId": backfill_id}, deployment=deployment
+    )
+    return json.dumps(data["cancelPartitionBackfill"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def resume_backfill(
+    backfill_id: Annotated[
+        str,
+        Field(description="The backfill ID to resume."),
+    ],
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the backfill's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Resume a failed or canceled Dagster+ backfill from where it left off. Call with confirm=False first to preview the backfill's current state, then confirm=True to execute."""
+    if not confirm:
+        data = await gql(
+            BACKFILL_QUERY, {"backfillId": backfill_id}, deployment=deployment
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "backfill": data["partitionBackfillOrError"],
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        RESUME_BACKFILL_MUTATION, {"backfillId": backfill_id}, deployment=deployment
+    )
+    return json.dumps(data["resumePartitionBackfill"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def start_schedule(
+    schedule_name: Annotated[
+        str,
+        Field(description="The schedule name."),
+    ],
+    repository_location_name: Annotated[
+        str,
+        Field(description="The code location name (e.g. 'kipptaf')."),
+    ],
+    repository_name: Annotated[
+        str,
+        Field(description="The repository name (default '__repository__')."),
+    ] = "__repository__",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the schedule's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Start (turn on) a Dagster+ schedule. Call with confirm=False first to preview the schedule's current state, then confirm=True to execute."""
+    selector = {
+        "scheduleName": schedule_name,
+        "repositoryLocationName": repository_location_name,
+        "repositoryName": repository_name,
+    }
+    if not confirm:
+        data = await gql(
+            SCHEDULE_STATE_QUERY, {"scheduleSelector": selector}, deployment=deployment
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "schedule": data["scheduleOrError"],
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        START_SCHEDULE_MUTATION, {"scheduleSelector": selector}, deployment=deployment
+    )
+    return json.dumps(data["startSchedule"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def stop_schedule(
+    schedule_name: Annotated[
+        str,
+        Field(description="The schedule name."),
+    ],
+    repository_location_name: Annotated[
+        str,
+        Field(description="The code location name (e.g. 'kipptaf')."),
+    ],
+    repository_name: Annotated[
+        str,
+        Field(description="The repository name (default '__repository__')."),
+    ] = "__repository__",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the schedule's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Stop (turn off) a running Dagster+ schedule. Call with confirm=False first to preview the schedule's current state, then confirm=True to execute."""
+    selector = {
+        "scheduleName": schedule_name,
+        "repositoryLocationName": repository_location_name,
+        "repositoryName": repository_name,
+    }
+    data = await gql(
+        SCHEDULE_STATE_QUERY, {"scheduleSelector": selector}, deployment=deployment
+    )
+    schedule = data["scheduleOrError"]
+    if schedule.get("__typename") != "Schedule":
+        return json.dumps(schedule)
+    if not confirm:
+        return json.dumps(
+            {
+                "mode": "preview",
+                "schedule": schedule,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    state_id = schedule["scheduleState"]["id"]
+    data = await gql(STOP_SCHEDULE_MUTATION, {"id": state_id}, deployment=deployment)
+    return json.dumps(data["stopRunningSchedule"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def start_sensor(
+    sensor_name: Annotated[
+        str,
+        Field(description="The sensor name."),
+    ],
+    repository_location_name: Annotated[
+        str,
+        Field(description="The code location name (e.g. 'kipptaf')."),
+    ],
+    repository_name: Annotated[
+        str,
+        Field(description="The repository name (default '__repository__')."),
+    ] = "__repository__",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the sensor's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Start (turn on) a Dagster+ sensor. Call with confirm=False first to preview the sensor's current state, then confirm=True to execute."""
+    selector = {
+        "sensorName": sensor_name,
+        "repositoryLocationName": repository_location_name,
+        "repositoryName": repository_name,
+    }
+    if not confirm:
+        data = await gql(
+            SENSOR_STATE_QUERY, {"sensorSelector": selector}, deployment=deployment
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "sensor": data["sensorOrError"],
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        START_SENSOR_MUTATION, {"sensorSelector": selector}, deployment=deployment
+    )
+    return json.dumps(data["startSensor"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def stop_sensor(
+    sensor_name: Annotated[
+        str,
+        Field(description="The sensor name."),
+    ],
+    repository_location_name: Annotated[
+        str,
+        Field(description="The code location name (e.g. 'kipptaf')."),
+    ],
+    repository_name: Annotated[
+        str,
+        Field(description="The repository name (default '__repository__')."),
+    ] = "__repository__",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the sensor's "
+                "current state. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Stop (turn off) a running Dagster+ sensor. Call with confirm=False first to preview the sensor's current state, then confirm=True to execute."""
+    selector = {
+        "sensorName": sensor_name,
+        "repositoryLocationName": repository_location_name,
+        "repositoryName": repository_name,
+    }
+    data = await gql(
+        SENSOR_STATE_QUERY, {"sensorSelector": selector}, deployment=deployment
+    )
+    sensor = data["sensorOrError"]
+    if sensor.get("__typename") != "Sensor":
+        return json.dumps(sensor)
+    if not confirm:
+        return json.dumps(
+            {
+                "mode": "preview",
+                "sensor": sensor,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    state_id = sensor["sensorState"]["id"]
+    data = await gql(STOP_SENSOR_MUTATION, {"id": state_id}, deployment=deployment)
+    return json.dumps(data["stopSensor"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def set_sensor_cursor(
+    sensor_name: Annotated[
+        str,
+        Field(description="The sensor name."),
+    ],
+    repository_location_name: Annotated[
+        str,
+        Field(description="The code location name (e.g. 'kipptaf')."),
+    ],
+    cursor: Annotated[
+        str | None,
+        Field(
+            description=(
+                "New cursor value. Pass null to reset the cursor entirely."
+            ),
+        ),
+    ] = None,
+    repository_name: Annotated[
+        str,
+        Field(description="The repository name (default '__repository__')."),
+    ] = "__repository__",
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview with the sensor's current "
+                "cursor. True executes the mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Set or reset a Dagster+ sensor's cursor (its tracking position). Call with confirm=False first to preview the current cursor, then confirm=True to execute."""
+    selector = {
+        "sensorName": sensor_name,
+        "repositoryLocationName": repository_location_name,
+        "repositoryName": repository_name,
+    }
+    if not confirm:
+        data = await gql(
+            SENSOR_STATE_QUERY, {"sensorSelector": selector}, deployment=deployment
+        )
+        return json.dumps(
+            {
+                "mode": "preview",
+                "sensor": data["sensorOrError"],
+                "new_cursor": cursor,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        SET_SENSOR_CURSOR_MUTATION,
+        {"sensorSelector": selector, "cursor": cursor},
+        deployment=deployment,
+    )
+    return json.dumps(data["setSensorCursor"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def reload_code_location(
+    location_name: Annotated[
+        str,
+        Field(description="The code location name to reload (e.g. 'kipptaf')."),
+    ],
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview. True executes the "
+                "mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Reload a Dagster+ code location (re-import its definitions). Use after a failed deploy or to pick up external changes. Call with confirm=False first, then confirm=True to execute."""
+    if not confirm:
+        return json.dumps(
+            {
+                "mode": "preview",
+                "location_name": location_name,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        RELOAD_REPOSITORY_LOCATION_MUTATION,
+        {"repositoryLocationName": location_name},
+        deployment=deployment,
+    )
+    return json.dumps(data["reloadRepositoryLocation"])
+
+
+@server.tool()
+@_handle_gql_errors
+async def free_concurrency_slots(
+    run_id: Annotated[
+        str,
+        Field(description="The run ID holding the concurrency slots."),
+    ],
+    step_key: Annotated[
+        str | None,
+        Field(
+            description=(
+                "Free only this step's slot. Omit to free all slots held by "
+                "the run."
+            ),
+        ),
+    ] = None,
+    confirm: Annotated[
+        bool,
+        Field(
+            description=(
+                "False (default) returns a preview. True executes the "
+                "mutation."
+            ),
+        ),
+    ] = False,
+    deployment: Deployment = None,
+) -> str:
+    """Free concurrency slots held by a Dagster+ run — unblocks pipelines stuck behind a dead run that never released its slots. Call with confirm=False first, then confirm=True to execute."""
+    if not confirm:
+        return json.dumps(
+            {
+                "mode": "preview",
+                "run_id": run_id,
+                "step_key": step_key,
+                "action_required": "Call again with confirm=True to execute.",
+            },
+        )
+    data = await gql(
+        FREE_CONCURRENCY_SLOTS_MUTATION,
+        {"runId": run_id, "stepKey": step_key},
+        deployment=deployment,
+    )
+    return json.dumps({"freed": data["freeConcurrencySlots"]})

@@ -55,9 +55,14 @@ server = FastMCP(
         "the node where numTrue=0 that should be >0, userLabel/expandedLabel "
         "identifies which rule blocked it, (3) if the condition tree looks "
         "correct, get_tick_history for the sensor to check for errors or skips. "
-        "Mutation tools (launch_run, launch_multiple_runs, "
-        "reexecute_run) require confirm=True to execute — always preview first "
-        "with confirm=False."
+        "Mutation tools (launch_run, launch_multiple_runs, reexecute_run, "
+        "terminate_runs, cancel_backfill, resume_backfill, start_schedule, "
+        "stop_schedule, start_sensor, stop_sensor, set_sensor_cursor, "
+        "reload_code_location, free_concurrency_slots) require confirm=True "
+        "to execute — always preview first with confirm=False. "
+        "All tools accept an optional deployment argument to target a branch "
+        "deployment instead of the default; discover deployment names with "
+        "list_deployments."
     ),
     lifespan=_lifespan,
 )
@@ -72,12 +77,28 @@ class GraphQLError(Exception):
         self.details = details
 
 
-async def gql(query: str, variables: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Execute a GraphQL query against the Dagster+ API."""
+async def gql(
+    query: str,
+    variables: dict[str, Any] | None = None,
+    deployment: str | None = None,
+) -> dict[str, Any]:
+    """Execute a GraphQL query against the Dagster+ API.
+
+    When deployment is given, the request targets that deployment's endpoint
+    (e.g. a branch deployment) instead of the environment-configured default.
+    """
     if _client is None:
         raise RuntimeError("HTTP client not initialized (lifespan not started)")
+    url = (
+        ""
+        if deployment is None
+        else (
+            f"https://{DAGSTER_CLOUD_ORGANIZATION_ID}.dagster.cloud"
+            f"/{deployment}/graphql"
+        )
+    )
     response = await _client.post(
-        "", json={"query": query, "variables": variables or {}}
+        url, json={"query": query, "variables": variables or {}}
     )
     if not response.is_success:
         raise GraphQLError(

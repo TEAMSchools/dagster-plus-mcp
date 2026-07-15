@@ -23,7 +23,19 @@ Set three required environment variables:
 | ------------------------------- | ------------------------------------ |
 | `DAGSTER_CLOUD_API_TOKEN`       | Dagster Cloud user or agent token    |
 | `DAGSTER_CLOUD_ORGANIZATION_ID` | Organization slug (e.g. `myorg`)     |
-| `DAGSTER_CLOUD_DEPLOYMENT`      | Deployment name (e.g. `prod`)        |
+| `DAGSTER_CLOUD_DEPLOYMENT`      | Default deployment name (e.g. `prod`) |
+
+### Targeting other deployments
+
+`DAGSTER_CLOUD_DEPLOYMENT` sets the default, but every tool accepts an
+optional `deployment` argument to target another deployment per call — most
+usefully a branch deployment when diagnosing a PR's code location. Discover
+deployment names (production plus active branch deployments, with branch/PR
+metadata) with the `list_deployments` tool:
+
+1. `list_deployments` — find the branch deployment's `deploymentName`
+2. Any other tool with `deployment="<that name>"` — e.g.
+   `list_code_locations`, `get_location_load_history`, `list_runs`
 
 ## Usage
 
@@ -80,6 +92,35 @@ DAGSTER_CLOUD_DEPLOYMENT=prod \
 | `get_backfill` | Details for a single backfill |
 | `get_run_group` | Full re-execution chain for a run |
 | `get_location_load_history` | Deploy timeline for a code location |
+| `list_deployments` | List deployments (prod + branch deployments) |
+
+### Mutation tools
+
+All mutation tools use a confirm-flag pattern: `confirm=False` (the default)
+returns a preview; `confirm=True` executes.
+
+| Tool | Description |
+| --- | --- |
 | `launch_run` | Materialize selected assets |
 | `launch_multiple_runs` | Batch-launch multiple materializations |
 | `reexecute_run` | Re-execute a previous run |
+| `terminate_runs` | Terminate in-progress runs (safe or immediate) |
+| `cancel_backfill` | Cancel an in-progress backfill |
+| `resume_backfill` | Resume a failed/canceled backfill |
+| `start_schedule` / `stop_schedule` | Turn a schedule on or off |
+| `start_sensor` / `stop_sensor` | Turn a sensor on or off |
+| `set_sensor_cursor` | Set or reset a sensor's cursor |
+| `reload_code_location` | Re-import a code location's definitions |
+| `free_concurrency_slots` | Free slots held by a dead run |
+
+## Development
+
+```bash
+uv run --group dev pytest            # unit tests (no API access needed)
+uv run scripts/validate_queries.py   # validate queries.py against schema.json
+uv run scripts/refresh_schema.py     # re-introspect the live API into schema.json
+```
+
+`refresh_schema.py` needs the same three environment variables as the server.
+After refreshing, run `validate_queries.py` to find queries broken by schema
+drift.

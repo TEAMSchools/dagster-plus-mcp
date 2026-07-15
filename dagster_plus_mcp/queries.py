@@ -853,3 +853,227 @@ query GetLocationLoadHistory($locationName: String!, $limit: Int!, $cursor: Stri
   }
 }
 """
+
+FULL_DEPLOYMENTS_QUERY = """
+query ListDeployments {
+  fullDeployments {
+    deploymentName
+    deploymentId
+    deploymentStatus
+    deploymentType
+    isBranchDeployment
+    branchDeploymentGitMetadata {
+      branchName
+      repoName
+      branchUrl
+      pullRequestUrl
+      pullRequestStatus
+      pullRequestNumber
+    }
+    latestCommit {
+      timestamp
+      commitHash
+      commitMessage
+      authorName
+    }
+  }
+}
+"""
+
+TERMINATE_RUNS_MUTATION = """
+mutation TerminateRuns($runIds: [String!]!, $terminatePolicy: TerminateRunPolicy) {
+  terminateRuns(runIds: $runIds, terminatePolicy: $terminatePolicy) {
+    __typename
+    ... on TerminateRunsResult {
+      terminateRunResults {
+        __typename
+        ... on TerminateRunSuccess {
+          run { id jobName status }
+        }
+        ... on TerminateRunFailure {
+          run { id jobName status }
+          message
+        }
+        ... on RunNotFoundError { message }
+        ... on UnauthorizedError { message }
+        ... on PythonError { message stack }
+      }
+    }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+CANCEL_BACKFILL_MUTATION = """
+mutation CancelBackfill($backfillId: String!) {
+  cancelPartitionBackfill(backfillId: $backfillId) {
+    __typename
+    ... on CancelBackfillSuccess { backfillId }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+RESUME_BACKFILL_MUTATION = """
+mutation ResumeBackfill($backfillId: String!) {
+  resumePartitionBackfill(backfillId: $backfillId) {
+    __typename
+    ... on ResumeBackfillSuccess { backfillId }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+SCHEDULE_STATE_QUERY = """
+query GetScheduleState($scheduleSelector: ScheduleSelector!) {
+  scheduleOrError(scheduleSelector: $scheduleSelector) {
+    __typename
+    ... on Schedule {
+      id
+      name
+      cronSchedule
+      scheduleState {
+        id
+        status
+        hasStartPermission
+        hasStopPermission
+      }
+    }
+    ... on ScheduleNotFoundError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+START_SCHEDULE_MUTATION = """
+mutation StartSchedule($scheduleSelector: ScheduleSelector!) {
+  startSchedule(scheduleSelector: $scheduleSelector) {
+    __typename
+    ... on ScheduleStateResult {
+      scheduleState { id name status }
+    }
+    ... on ScheduleNotFoundError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+STOP_SCHEDULE_MUTATION = """
+mutation StopSchedule($id: String) {
+  stopRunningSchedule(id: $id) {
+    __typename
+    ... on ScheduleStateResult {
+      scheduleState { id name status }
+    }
+    ... on ScheduleNotFoundError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+SENSOR_STATE_QUERY = """
+query GetSensorState($sensorSelector: SensorSelector!) {
+  sensorOrError(sensorSelector: $sensorSelector) {
+    __typename
+    ... on Sensor {
+      id
+      name
+      sensorType
+      sensorState {
+        id
+        status
+        hasStartPermission
+        hasStopPermission
+        typeSpecificData {
+          ... on SensorData { lastCursor }
+        }
+      }
+    }
+    ... on SensorNotFoundError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+START_SENSOR_MUTATION = """
+mutation StartSensor($sensorSelector: SensorSelector!) {
+  startSensor(sensorSelector: $sensorSelector) {
+    __typename
+    ... on Sensor {
+      id
+      name
+      sensorState { id status }
+    }
+    ... on SensorNotFoundError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+STOP_SENSOR_MUTATION = """
+mutation StopSensor($id: String) {
+  stopSensor(id: $id) {
+    __typename
+    ... on StopSensorMutationResult {
+      instigationState { id name status }
+    }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+SET_SENSOR_CURSOR_MUTATION = """
+mutation SetSensorCursor($sensorSelector: SensorSelector!, $cursor: String) {
+  setSensorCursor(sensorSelector: $sensorSelector, cursor: $cursor) {
+    __typename
+    ... on Sensor {
+      id
+      name
+      sensorState {
+        id
+        status
+        typeSpecificData {
+          ... on SensorData { lastCursor }
+        }
+      }
+    }
+    ... on SensorNotFoundError { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+RELOAD_REPOSITORY_LOCATION_MUTATION = """
+mutation ReloadRepositoryLocation($repositoryLocationName: String!) {
+  reloadRepositoryLocation(repositoryLocationName: $repositoryLocationName) {
+    __typename
+    ... on WorkspaceLocationEntry {
+      id
+      name
+      loadStatus
+      updatedTimestamp
+      locationOrLoadError {
+        ... on RepositoryLocation { id name }
+        ... on PythonError { message stack }
+      }
+    }
+    ... on ReloadNotSupported { message }
+    ... on RepositoryLocationNotFound { message }
+    ... on UnauthorizedError { message }
+    ... on PythonError { message stack }
+  }
+}
+"""
+
+FREE_CONCURRENCY_SLOTS_MUTATION = """
+mutation FreeConcurrencySlots($runId: String!, $stepKey: String) {
+  freeConcurrencySlots(runId: $runId, stepKey: $stepKey)
+}
+"""
