@@ -1,4 +1,4 @@
-"""FastMCP server instance and GraphQL client for Dagster+."""
+"""MCP server instance and GraphQL client for Dagster+."""
 
 import logging
 import os
@@ -9,7 +9,7 @@ from typing import Any
 
 import httpx
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -40,7 +40,7 @@ _client: httpx.AsyncClient | None = None
 
 
 @asynccontextmanager
-async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
+async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
     global _client  # noqa: PLW0603
     _client = httpx.AsyncClient(
         base_url=GRAPHQL_URL,
@@ -57,7 +57,7 @@ async def _lifespan(_server: FastMCP) -> AsyncIterator[None]:
         _client = None
 
 
-server = FastMCP(
+server = MCPServer(
     "dagster-plus",
     instructions=(
         "Dagster+ operational server for KIPP TEAM & Family Schools. "

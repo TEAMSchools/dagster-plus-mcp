@@ -1,11 +1,13 @@
 # CLAUDE.md — dagster-plus-mcp
 
-FastMCP server exposing Dagster+ operational data via GraphQL.
+MCP server exposing Dagster+ operational data via GraphQL. Built on the `mcp`
+Python SDK 2.x — the server class is `MCPServer` (`FastMCP` in 1.x); pin
+`mcp>=2,<3` so a future major can't break the import.
 
 ## Package Structure
 
-- `server.py` — `FastMCP` instance (with `instructions`), env vars, persistent
-  `httpx.AsyncClient`, async `gql()` client, `GraphQLError` exception
+- `server.py` — `MCPServer` instance (with `instructions`), env vars,
+  persistent `httpx.AsyncClient`, async `gql()` client, `GraphQLError` exception
 - `queries.py` — GraphQL query strings (see GraphQL section below before
   modifying)
 - `tools.py` — async `@server.tool()` handlers with
@@ -19,8 +21,8 @@ FastMCP server exposing Dagster+ operational data via GraphQL.
   `conftest.py`), no API access needed. Run with `uv run --group dev pytest`.
 
 **Adding a tool:** Add query to `queries.py`, add `@server.tool()` function to
-`tools.py` with the `@_handle_gql_errors` decorator. FastMCP auto-generates JSON
-schema from type hints. Use `BaseModel` subclasses for complex input types (see
+`tools.py` with the `@_handle_gql_errors` decorator. `MCPServer` auto-generates
+JSON schema from type hints. Use `BaseModel` subclasses for complex input types (see
 `RunSpec`). Give the tool a trailing `deployment: Deployment = None` parameter
 and pass `deployment=deployment` to every `gql()` call so it supports
 branch-deployment targeting. Run `uv run scripts/validate_queries.py` before
