@@ -97,43 +97,177 @@ class TestRunSpec:
         assert spec.run_config is None
 
 
-class TestGetRunLogsFiltering:
-    async def test_filter_types_client_side(self, gql_recorder):
+def _logs_page(*events: dict, cursor: str | None = None, has_more: bool = False):
+    return {
+        "logsForRun": {
+            "events": list(events),
+            "cursor": cursor,
+            "hasMore": has_more,
+        }
+    }
+
+
+def _captured(step_keys: list[str], log_key: str):
+    return {
+        "__typename": "LogsCapturedEvent",
+        "logKey": log_key,
+        "stepKeys": step_keys,
+    }
+
+
+class TestResolveLogKey:
+    async def test_single_event_resolves_without_step_key(self, gql_recorder):
+        gql_recorder.queue(_logs_page(_captured(["step_a"], "twzyagjy")))
+        assert await tools._resolve_log_key("r1", None, None) == [
+            "r1",
+            "compute_logs",
+            "twzyagjy",
+        ]
+
+    async def test_step_key_selects_among_several(self, gql_recorder):
         gql_recorder.queue(
-            {
-                "logsForRun": {
-                    "events": [
-                        {"__typename": "ExecutionStepStartEvent", "stepKey": "a"},
-                        {"__typename": "ExecutionStepFailureEvent", "stepKey": "b"},
-                        {"__typename": "MessageEvent", "message": "hi"},
-                    ],
-                    "cursor": "c1",
-                    "hasMore": False,
-                }
-            }
-        )
-        result = json.loads(
-            await tools.get_run_logs(
-                run_id="r1", filter_types=["ExecutionStepFailureEvent"]
+            _logs_page(
+                {"__typename": "ExecutionStepStartEvent"},
+                _captured(["step_a"], "aaaaaaaa"),
+                _captured(["step_b"], "bbbbbbbb"),
             )
         )
-        assert [e["__typename"] for e in result["events"]] == [
-            "ExecutionStepFailureEvent"
-        ]
-        assert result["cursor"] == "c1"
+        key = await tools._resolve_log_key("r1", "step_b", None)
+        assert key == ["r1", "compute_logs", "bbbbbbbb"]
 
-    async def test_no_filter_returns_all(self, gql_recorder):
+    async def test_ambiguous_run_returns_candidates(self, gql_recorder):
         gql_recorder.queue(
-            {
-                "logsForRun": {
-                    "events": [{"__typename": "MessageEvent", "message": "hi"}],
-                    "cursor": None,
-                    "hasMore": False,
-                }
-            }
+            _logs_page(
+                _captured(["step_a"], "aaaaaaaa"),
+                _captured(["step_b"], "bbbbbbbb"),
+            )
         )
-        result = json.loads(await tools.get_run_logs(run_id="r1"))
-        assert len(result["events"]) == 1
+        result = json.loads(await tools.get_run_compute_logs(run_id="r1"))
+        assert [c["logKey"] for c in result["details"]["candidates"]] == [
+            "aaaaaaaa",
+            "bbbbbbbb",
+        ]
+
+    async def test_pages_when_first_page_has_no_captured_event(self, gql_recorder):
+        gql_recorder.queue(
+            _logs_page(
+                {"__typename": "ExecutionStepStartEvent"},
+                cursor="c1",
+                has_more=True,
+            ),
+            _logs_page(_captured(["step_a"], "twzyagjy")),
+        )
+        assert await tools._resolve_log_key("r1", None, None) == [
+            "r1",
+            "compute_logs",
+            "twzyagjy",
+        ]
+        assert gql_recorder.calls[1]["variables"]["afterCursor"] == "c1"
+
+    async def test_stops_paging_once_ambiguous(self, gql_recorder):
+        gql_recorder.queue(
+            _logs_page(
+                _captured(["step_a"], "aaaaaaaa"),
+                _captured(["step_b"], "bbbbbbbb"),
+                cursor="c1",
+                has_more=True,
+            )
+        )
+        result = json.loads(await tools.get_run_compute_logs(run_id="r1"))
+        assert "error" in result
+        assert len(gql_recorder.calls) == 1
+
+    async def test_keeps_paging_for_a_second_step_worker(self, gql_recorder):
+        # A later step captures later in the run, so one candidate on page 1
+        # does not mean the run is unambiguous.
+        gql_recorder.queue(
+            _logs_page(_captured(["step_a"], "aaaaaaaa"), cursor="c1", has_more=True),
+            _logs_page(_captured(["step_b"], "bbbbbbbb")),
+        )
+        result = json.loads(await tools.get_run_compute_logs(run_id="r1"))
+        assert "error" in result
+        assert len(gql_recorder.calls) == 2
+
+    async def test_retried_step_returns_both_captures(self, gql_recorder):
+        gql_recorder.queue(
+            _logs_page(
+                _captured(["step_a"], "aaaaaaaa"),
+                _captured(["step_a"], "cccccccc"),
+            )
+        )
+        result = json.loads(
+            await tools.get_run_compute_logs(run_id="r1", step_key="step_a")
+        )
+        assert "retry" in result["error"]
+        assert [c["logKey"] for c in result["details"]["candidates"]] == [
+            "aaaaaaaa",
+            "cccccccc",
+        ]
+
+    async def test_no_captured_event_errors_with_hint(self, gql_recorder):
+        gql_recorder.queue(_logs_page({"__typename": "ExecutionStepStartEvent"}))
+        result = json.loads(await tools.get_run_compute_logs(run_id="r1"))
+        assert "No captured compute logs" in result["error"]
+        assert "hint" in result["details"]
+
+    async def test_run_not_found_surfaces_message(self, gql_recorder):
+        gql_recorder.queue(
+            {"logsForRun": {"__typename": "RunNotFoundError", "message": "nope"}}
+        )
+        result = json.loads(await tools.get_captured_logs_metadata(run_id="r1"))
+        assert result["error"] == "nope"
+
+    async def test_slim_selection_set_omits_message_event(self):
+        assert "LogsCapturedEvent" in queries.LOG_KEYS_QUERY
+        assert "MessageEvent" not in queries.LOG_KEYS_QUERY
+
+
+class TestComputeLogTools:
+    async def test_resolves_then_fetches(self, gql_recorder):
+        gql_recorder.queue(
+            _logs_page(_captured(["step_a"], "twzyagjy")),
+            {"capturedLogs": {"stdout": None, "stderr": "boom", "cursor": "c"}},
+        )
+        result = json.loads(await tools.get_run_compute_logs(run_id="r1"))
+        assert result["logKey"] == ["r1", "compute_logs", "twzyagjy"]
+        assert result["stderr"] == "boom"
+        assert gql_recorder.calls[1]["variables"]["logKey"] == [
+            "r1",
+            "compute_logs",
+            "twzyagjy",
+        ]
+
+    async def test_explicit_log_key_skips_resolution(self, gql_recorder):
+        gql_recorder.queue(
+            {"capturedLogs": {"stdout": "hi", "stderr": None, "cursor": None}}
+        )
+        result = json.loads(
+            await tools.get_run_compute_logs(log_key=["r1", "compute_logs", "zzzz"])
+        )
+        assert result["stdout"] == "hi"
+        assert len(gql_recorder.calls) == 1
+
+    async def test_missing_run_id_and_log_key_errors(self, gql_recorder):
+        result = json.loads(await tools.get_run_compute_logs())
+        assert result["error"] == "ValueError"
+
+    async def test_metadata_resolves_log_key(self, gql_recorder):
+        gql_recorder.queue(
+            _logs_page(_captured(["step_a"], "twzyagjy")),
+            {
+                "capturedLogsMetadata": {
+                    "stdoutDownloadUrl": None,
+                    "stdoutLocation": None,
+                    "stderrDownloadUrl": "https://example/x.err",
+                    "stderrLocation": "s3://bucket/twzyagjy.err",
+                }
+            },
+        )
+        result = json.loads(
+            await tools.get_captured_logs_metadata(run_id="r1", step_key="step_a")
+        )
+        assert result["logKey"] == ["r1", "compute_logs", "twzyagjy"]
+        assert result["stderrLocation"].endswith("twzyagjy.err")
 
 
 class TestCloudAgentsFiltering:

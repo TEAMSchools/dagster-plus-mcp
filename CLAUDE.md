@@ -103,9 +103,9 @@ API).
 
 ## Pagination
 
-`list_runs`, `get_run_logs`, `get_asset_condition_evaluations`,
-`get_asset_check_executions`, `list_backfills`, `search_assets`, and
-`get_location_load_history` return a `cursor`. Pass it back to page forward.
+`list_runs`, `get_asset_condition_evaluations`, `get_asset_check_executions`,
+`list_backfills`, `search_assets`, and `get_location_load_history` return a
+`cursor`. Pass it back to page forward.
 
 Server-side timestamp filtering is available on:
 
@@ -131,8 +131,8 @@ Other tools require client-side filtering after pagination.
 - `get_location_load_history` — shows deploy timeline per code location with
   load status (`LOADED`/`ERROR`), timestamps, and error details. Use for
   diagnosing failed deploys.
-- `get_run` now includes `stepStats` — per-step timing and status without
-  fetching full logs via `get_run_logs`.
+- `get_run` includes `stepStats` — per-step timing and status without fetching
+  the full event log.
 
 ## Diagnosing assets (cross-tool)
 
@@ -148,7 +148,37 @@ Tool selection and diagnostic workflows are in the server `instructions` (see
 - `get_daemon_health` returns `lastHeartbeatTime: null` for all daemons on
   Dagster Cloud — only useful as a binary healthy/unhealthy check
 - `get_run_compute_logs` returns null for GKE runs (ephemeral pods)
-- `get_run_logs` returns `timestamp: null` for non-`MessageEvent` types
+
+## Compute logs and the logKey
+
+There is no general-purpose run-log reader here — Dagster's official hosted MCP
+server (`https://mcp.agent.dagster.cloud/mcp`) has `get_run_logs` with a
+richer error payload, so ours was deleted. The one thing it did that the
+official one can't is surface `logKey`: the official `LOGS_CAPTURED` payload
+omits it.
+
+`logKey` is an opaque 8-char string (`twzyagjy`), **not** derivable from
+run_id and step_key — `[run_id, "compute_logs", step_key]` returns
+`stdout: null, stderr: null`. The files live in Dagster's own S3 bucket at
+`.../<run_id>/compute_logs/<logKey>.err`, so a run's `LogsCapturedEvent` is
+the only source.
+
+`get_run_compute_logs` and `get_captured_logs_metadata` therefore resolve it
+themselves from `run_id` via `_resolve_log_key` (`LOG_KEYS_QUERY` in
+`queries.py`), with `log_key` kept as an escape hatch for a key the caller
+already holds. Two things that query and helper depend on:
+
+- `logsForRun` has no server-side type filter, but omitting every fragment
+  except `LogsCapturedEvent` makes other events come back as a bare
+  `{"__typename": "..."}` — a few KB instead of a few hundred on a 329-event
+  run.
+- A run emits one `LogsCapturedEvent` per step worker, so `step_key` is
+  matched against the event's `stepKeys` array. Omitted `step_key` works only
+  when the run has exactly one candidate; an ambiguous run returns the
+  candidates instead of guessing.
+
+`scripts/check_log_key_resolution.py` is a live round-trip check for this
+(needs the three env vars; runs in the project env, not PEP 723).
 
 ## Mutation tools
 
