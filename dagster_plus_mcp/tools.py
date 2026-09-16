@@ -29,11 +29,11 @@ from .queries import (
     LAUNCH_RUN_REEXECUTION_MUTATION,
     LIST_RUNS_QUERY,
     LOCATION_LOAD_HISTORY_QUERY,
+    LOG_KEYS_QUERY,
     RELOAD_REPOSITORY_LOCATION_MUTATION,
     RESUME_BACKFILL_MUTATION,
     RUN_BY_ID_QUERY,
     RUN_GROUP_QUERY,
-    RUN_LOGS_QUERY,
     SCHEDULE_STATE_QUERY,
     SCHEDULES_QUERY,
     SENSOR_STATE_QUERY,
@@ -213,75 +213,137 @@ async def get_run(
     return json.dumps(data["runOrError"])
 
 
-@server.tool()
-@_handle_gql_errors
-async def get_run_logs(
-    run_id: Annotated[
-        str,
-        Field(description="The run ID to fetch logs for."),
-    ],
-    cursor: Annotated[
-        str | None,
-        Field(description="Pagination cursor from a previous get_run_logs call."),
-    ] = None,
-    limit: Annotated[
-        int,
-        Field(
-            description=(
-                "Max events to fetch per page (default 100, max 1000). "
-                "When filter_types is set, filtering happens client-side "
-                "after fetching — increase limit to see more matching events."
-            ),
+# The compute-log storage key is an opaque 8-char string ("twzyagjy"), not
+# derivable from run_id and step_key — [run_id, "compute_logs", step_key]
+# returns nulls. A run's LogsCapturedEvent is the only source for it.
+_LOG_KEY_PAGE_LIMIT = 1000
+_LOG_KEY_MAX_PAGES = 10
+
+RunIdArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Run ID whose compute-log key to resolve. Required unless "
+            "log_key is given."
         ),
-    ] = 100,
-    filter_types: Annotated[
-        list[str] | None,
-        Field(
-            description=(
-                "Only return events of these __typename values, e.g. "
-                "['ExecutionStepFailureEvent', 'RunFailureEvent']. "
-                "Omit to return all event types."
-            ),
+    ),
+]
+
+StepKeyArg = Annotated[
+    str | None,
+    Field(
+        description=(
+            "Step to select when the run captured logs for several step "
+            "workers, e.g. 'kippmiami_dbt_assets'. Omit when the run has a "
+            "single LogsCapturedEvent."
         ),
-    ] = None,
-    deployment: Deployment = None,
-) -> str:
-    """Get the structured event log for a Dagster+ run. Includes step start/success/failure events, log messages, asset materializations, engine errors, and resource init failures. Paginate with cursor if hasMore is true."""
-    limit = min(limit, 1000)
-    data = await gql(
-        RUN_LOGS_QUERY,
-        {
-            "runId": run_id,
-            "afterCursor": cursor,
-            "limit": limit,
-        },
-        deployment=deployment,
-    )
-    result = data["logsForRun"]
-    if filter_types:
-        filter_set = set(filter_types)
-        if isinstance(result, dict) and "events" in result:
-            result = {
-                **result,
-                "events": [
-                    e for e in result["events"] if e.get("__typename") in filter_set
-                ],
-            }
-    return json.dumps(result)
+    ),
+]
+
+LogKeyArg = Annotated[
+    list[str] | None,
+    Field(
+        description=(
+            "Escape hatch for a key you already hold: the full logKey array, "
+            '["<run_id>", "compute_logs", "<opaque key>"]. Omit and pass '
+            "run_id to have it resolved."
+        ),
+    ),
+]
+
+
+class LogKeyError(GraphQLError):
+    """The run's logKey could not be resolved to exactly one candidate.
+
+    Subclasses GraphQLError so _handle_gql_errors renders the candidate list
+    as structured JSON instead of a stringified traceback.
+    """
+
+
+async def _resolve_log_key(
+    run_id: str,
+    step_key: str | None,
+    deployment: str | None,
+) -> list[str]:
+    """Resolve a run's compute-log key by scanning its LogsCapturedEvents.
+
+    A run emits one LogsCapturedEvent per step worker, so step_key is matched
+    against each event's stepKeys array. The run must narrow to exactly one
+    key — anything else raises with the candidates rather than guessing. The
+    event lands early in the log (~13s into a 100s run), so the first page
+    almost always has it; paging is the fallback.
+
+    With step_key omitted, paging cannot stop at the first candidate: later
+    steps capture later in the run, so a second key may be pages away. It
+    stops once two are in hand, which is already ambiguous.
+    """
+    candidates: list[dict[str, Any]] = []
+    cursor: str | None = None
+    for _ in range(_LOG_KEY_MAX_PAGES):
+        data = await gql(
+            LOG_KEYS_QUERY,
+            {
+                "runId": run_id,
+                "afterCursor": cursor,
+                "limit": _LOG_KEY_PAGE_LIMIT,
+            },
+            deployment=deployment,
+        )
+        result = data["logsForRun"]
+        if "events" not in result:
+            raise LogKeyError(
+                result.get("message", f"Could not read logs for run {run_id}"),
+                details=result,
+            )
+        for event in result["events"]:
+            if event.get("__typename") != "LogsCapturedEvent":
+                continue
+            step_keys = event.get("stepKeys") or []
+            if step_key is None or step_key in step_keys:
+                candidates.append({"logKey": event["logKey"], "stepKeys": step_keys})
+        found = len({c["logKey"] for c in candidates})
+        if found > 1 or (step_key and found):
+            break
+        if not result.get("hasMore"):
+            break
+        cursor = result.get("cursor")
+        if cursor is None:
+            break
+
+    if not candidates:
+        raise LogKeyError(
+            f"No captured compute logs found for run {run_id}"
+            + (f" step {step_key}" if step_key else ""),
+            details={
+                "runId": run_id,
+                "stepKey": step_key,
+                "hint": (
+                    "The run may have emitted no LogsCapturedEvent (GKE runs "
+                    "with ephemeral pods), aged out of log retention, or the "
+                    "step key may be wrong — get_run returns stepStats."
+                ),
+            },
+        )
+    if len({c["logKey"] for c in candidates}) > 1:
+        raise LogKeyError(
+            f"Run {run_id} captured logs for several step workers — "
+            + (
+                f"step {step_key} has more than one capture (a retry?); "
+                "pass one of these as log_key."
+                if step_key
+                else "pass step_key to choose one."
+            ),
+            details={"candidates": candidates},
+        )
+    return [run_id, "compute_logs", candidates[0]["logKey"]]
 
 
 @server.tool()
 @_handle_gql_errors
 async def get_run_compute_logs(
-    log_key: Annotated[
-        list[str],
-        Field(
-            description=(
-                "The logKey array from a LogsCapturedEvent, e.g. "
-                '["<run_id>", "compute_logs", "<step_key>"].'
-            ),
-        ),
-    ],
+    run_id: RunIdArg = None,
+    step_key: StepKeyArg = None,
+    log_key: LogKeyArg = None,
     cursor: Annotated[
         str | None,
         Field(description="Pagination cursor from a previous call."),
@@ -292,7 +354,11 @@ async def get_run_compute_logs(
     ] = 50000,
     deployment: Deployment = None,
 ) -> str:
-    """Get raw stdout and stderr compute logs for a step in a Dagster+ run. First use get_run_logs to find LogsCapturedEvent entries, which contain the logKey needed here. Returns both stdout and stderr as separate fields."""
+    """Get raw stdout and stderr compute logs for a step in a Dagster+ run. Pass run_id — the compute-log key is resolved from the run's own events — plus step_key when the run captured logs for several step workers. Returns stdout and stderr as separate fields."""
+    if log_key is None:
+        if run_id is None:
+            raise ValueError("Pass run_id (or log_key).")
+        log_key = await _resolve_log_key(run_id, step_key, deployment)
     data = await gql(
         COMPUTE_LOGS_QUERY,
         {
@@ -302,25 +368,28 @@ async def get_run_compute_logs(
         },
         deployment=deployment,
     )
-    return json.dumps(data["capturedLogs"])
+    return json.dumps({"logKey": log_key, **data["capturedLogs"]})
 
 
 @server.tool()
 @_handle_gql_errors
 async def get_captured_logs_metadata(
-    log_key: Annotated[
-        list[str],
-        Field(description="The logKey array from a LogsCapturedEvent."),
-    ],
+    run_id: RunIdArg = None,
+    step_key: StepKeyArg = None,
+    log_key: LogKeyArg = None,
     deployment: Deployment = None,
 ) -> str:
-    """Get signed download URLs and storage locations for stdout/stderr compute logs. Use when logs are too large to stream via get_run_compute_logs. logKey comes from a LogsCapturedEvent."""
+    """Get signed download URLs and storage locations for stdout/stderr compute logs. Use when logs are too large to stream via get_run_compute_logs. Pass run_id — the compute-log key is resolved from the run's own events — plus step_key when the run captured logs for several step workers."""
+    if log_key is None:
+        if run_id is None:
+            raise ValueError("Pass run_id (or log_key).")
+        log_key = await _resolve_log_key(run_id, step_key, deployment)
     data = await gql(
         CAPTURED_LOGS_METADATA_QUERY,
         {"logKey": log_key},
         deployment=deployment,
     )
-    return json.dumps(data["capturedLogsMetadata"])
+    return json.dumps({"logKey": log_key, **data["capturedLogsMetadata"]})
 
 
 @server.tool()

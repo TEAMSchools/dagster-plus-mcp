@@ -80,64 +80,19 @@ query GetRun($runId: ID!) {
 }
 """
 
-RUN_LOGS_QUERY = """
-query GetRunLogs($runId: ID!, $afterCursor: String, $limit: Int) {
+# Only LogsCapturedEvent is selected: logsForRun has no server-side type
+# filter, but omitting every other fragment (including MessageEvent) makes
+# non-matching events come back as a bare {"__typename": "..."}. On a
+# 329-event run that is a few KB instead of a few hundred.
+LOG_KEYS_QUERY = """
+query GetLogKeys($runId: ID!, $afterCursor: String, $limit: Int) {
   logsForRun(runId: $runId, afterCursor: $afterCursor, limit: $limit) {
     ... on EventConnection {
       events {
         __typename
-        ... on MessageEvent {
-          message
-          level
-          stepKey
-          timestamp
-        }
-        ... on ExecutionStepFailureEvent {
-          stepKey
-          error {
-            message
-            stack
-            errorChain {
-              error { message stack }
-            }
-          }
-        }
-        ... on RunFailureEvent {
-          error {
-            message
-            stack
-            errorChain {
-              error { message stack }
-            }
-          }
-        }
-        ... on ExecutionStepStartEvent { stepKey }
-        ... on ExecutionStepSuccessEvent { stepKey }
-        ... on ExecutionStepSkippedEvent { stepKey }
-        ... on ExecutionStepRestartEvent { stepKey }
-        ... on ExecutionStepUpForRetryEvent {
-          stepKey
-          error { message stack }
-        }
         ... on LogsCapturedEvent {
           logKey
           stepKeys
-          externalUrl
-        }
-        ... on AssetMaterializationPlannedEvent {
-          assetKey { path }
-        }
-        ... on MaterializationEvent {
-          assetKey { path }
-          label
-          description
-        }
-        ... on EngineEvent {
-          error { message stack }
-        }
-        ... on ResourceInitFailureEvent {
-          stepKey
-          error { message stack }
         }
       }
       cursor

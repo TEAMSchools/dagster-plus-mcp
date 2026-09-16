@@ -72,9 +72,8 @@ DAGSTER_CLOUD_DEPLOYMENT=prod \
 | --- | --- |
 | `list_runs` | List recent runs with filtering by job, status, tags, time range |
 | `get_run` | Full details for a single run |
-| `get_run_logs` | Structured event log for a run |
-| `get_run_compute_logs` | Raw stdout/stderr for a step |
-| `get_captured_logs_metadata` | Download URLs for compute logs |
+| `get_run_compute_logs` | Raw stdout/stderr for a step, by run ID |
+| `get_captured_logs_metadata` | Download URLs for compute logs, by run ID |
 | `get_daemon_health` | Health status of all daemons |
 | `get_cloud_agents` | Agent statuses, errors, code server states |
 | `list_code_locations` | Workspace code locations and load status |
@@ -93,6 +92,12 @@ DAGSTER_CLOUD_DEPLOYMENT=prod \
 | `get_run_group` | Full re-execution chain for a run |
 | `get_location_load_history` | Deploy timeline for a code location |
 | `list_deployments` | List deployments (prod + branch deployments) |
+
+`get_run_compute_logs` and `get_captured_logs_metadata` take a `run_id` and
+resolve the run's opaque compute-log key themselves. Add `step_key` when a run
+captured logs for several step workers — without it, an ambiguous run returns
+the candidates rather than guessing. `log_key` stays available for a key you
+already hold.
 
 ### Mutation tools
 
@@ -119,6 +124,7 @@ returns a preview; `confirm=True` executes.
 uv run --group dev pytest            # unit tests (no API access needed)
 uv run scripts/validate_queries.py   # validate queries.py against schema.json
 uv run scripts/refresh_schema.py     # re-introspect the live API into schema.json
+uv run scripts/check_log_key_resolution.py  # live compute-log round-trip check
 ```
 
 `refresh_schema.py` needs the same three environment variables as the server.
