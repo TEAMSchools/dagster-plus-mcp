@@ -60,10 +60,10 @@ async def _lifespan(_server: MCPServer) -> AsyncIterator[None]:
 server = MCPServer(
     "dagster-plus",
     instructions=(
-        "Dagster+ operational server for KIPP TEAM & Family Schools. "
-        "To diagnose asset issues: use search_assets to discover assets by "
-        "prefix, then get_asset_health for health status (HEALTHY, DEGRADED, "
-        "WARNING, UNKNOWN) and get_asset_staleness for staleness root causes. "
+        "Dagster+ operational server for KIPP TEAM & Family Schools. It "
+        "complements Dagster's official hosted MCP server: lean on it for "
+        "automation, backfills, asset history, compute logs, and "
+        "infrastructure. For why an asset is stale, call get_asset_staleness. "
         "To diagnose missed materializations (asset expected to materialize but "
         "didn't): (1) get_asset_condition_evaluations with limit=1 for the "
         "latest evaluation, (2) walk evaluationNodes from rootUniqueId — find "
@@ -73,14 +73,10 @@ server = MCPServer(
         "For a failed run's raw stdout/stderr, call get_run_compute_logs with "
         "run_id — it resolves the run's compute-log key itself; add step_key "
         "when the run captured logs for several step workers. "
-        "Mutation tools (launch_run, launch_multiple_runs, reexecute_run, "
-        "terminate_runs, cancel_backfill, resume_backfill, start_schedule, "
-        "stop_schedule, start_sensor, stop_sensor, set_sensor_cursor, "
-        "reload_code_location, free_concurrency_slots) require confirm=True "
-        "to execute — always preview first with confirm=False. "
-        "All tools except list_deployments accept an optional deployment "
-        "argument to target a branch deployment instead of the default; "
-        "discover deployment names with list_deployments."
+        "Every mutation tool requires confirm=True to execute — always "
+        "preview first with confirm=False. Tools accept an optional "
+        "deployment argument to target a branch deployment instead of the "
+        "default."
     ),
     lifespan=_lifespan,
 )
